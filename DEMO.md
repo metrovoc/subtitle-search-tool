@@ -45,7 +45,8 @@
 
 ### Video Integration
 
-- VLC Media Player (recommended)
+- IINA (macOS recommended)
+- VLC Media Player (cross-platform)
 - mpv player
 - System default player
 - Precise timestamp seeking
@@ -54,14 +55,15 @@
 
 ### No video player found
 
-Install VLC Media Player:
+Install a compatible video player:
 
 ```bash
-# macOS
-brew install --cask vlc
+# macOS - IINA (recommended for macOS users)
+brew install --cask iina
 
-# Ubuntu/Debian
-sudo apt install vlc
+# Cross-platform - VLC Media Player
+brew install --cask vlc      # macOS
+sudo apt install vlc         # Ubuntu/Debian
 ```
 
 ### FFmpeg not found

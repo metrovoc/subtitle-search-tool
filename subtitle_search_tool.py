@@ -429,7 +429,11 @@ class SubtitleSearchTool:
         success = self._open_video_at_time(video_file, start_time_ms)
         
         if not success:
-            messagebox.showerror("Error", "Could not open video file. Please install VLC or another compatible video player.")
+            system = platform.system().lower()
+            if system == 'darwin':
+                messagebox.showerror("Error", "Could not open video file. Please install IINA or VLC Media Player.")
+            else:
+                messagebox.showerror("Error", "Could not open video file. Please install VLC or another compatible video player.")
     
     def _find_video_file_from_display_name(self, display_name: str) -> Optional[str]:
         """Find the original video file from display name"""
@@ -452,7 +456,11 @@ class SubtitleSearchTool:
         try:
             start_seconds = start_time_ms // 1000
             
-            # Try VLC first (best support for seeking)
+            # Try IINA first on macOS (excellent player with mpv backend)
+            if platform.system().lower() == 'darwin' and self._try_iina(video_file, start_seconds):
+                return True
+            
+            # Try VLC (best cross-platform support for seeking)
             if self._try_vlc(video_file, start_seconds):
                 return True
                 
@@ -469,6 +477,30 @@ class SubtitleSearchTool:
             
         except Exception as e:
             print(f"Error opening video: {e}")
+            return False
+    
+    def _try_iina(self, video_file: str, start_seconds: int) -> bool:
+        """Try to open with IINA (macOS)"""
+        iina_commands = [
+            'iina',
+            '/Applications/IINA.app/Contents/MacOS/iina'
+        ]
+        
+        for iina_cmd in iina_commands:
+            try:
+                # IINA uses mpv arguments
+                cmd = [iina_cmd, f'--mpv-start={start_seconds}', video_file]
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except (FileNotFoundError, OSError):
+                continue
+                
+        # Try using open command with IINA
+        try:
+            cmd = ['open', '-a', 'IINA', '--args', f'--mpv-start={start_seconds}', video_file]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except (FileNotFoundError, OSError):
             return False
     
     def _try_vlc(self, video_file: str, start_seconds: int) -> bool:

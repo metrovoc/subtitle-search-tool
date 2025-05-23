@@ -20,7 +20,7 @@ A GUI application to search text in subtitle files including embedded MKV subtit
 - Python 3.9+
 - FFmpeg (for MKV subtitle extraction)
 - uv (for Python package management)
-- **Recommended**: VLC Media Player (for best seeking support)
+- **Recommended**: IINA (macOS) or VLC Media Player (for best seeking support)
 
 ## Installation
 
@@ -37,17 +37,16 @@ A GUI application to search text in subtitle files including embedded MKV subtit
    # Download from https://ffmpeg.org/download.html
    ```
 
-2. Install VLC Media Player (optional but recommended):
+2. Install video player (optional but recommended):
 
    ```bash
-   # macOS
-   brew install --cask vlc
+   # macOS - IINA (recommended for macOS users)
+   brew install --cask iina
 
-   # Ubuntu/Debian
-   sudo apt install vlc
-
-   # Windows
-   # Download from https://www.videolan.org/vlc/
+   # macOS/Linux/Windows - VLC Media Player
+   brew install --cask vlc          # macOS
+   sudo apt install vlc             # Ubuntu/Debian
+   # Windows: Download from https://www.videolan.org/vlc/
    ```
 
 3. Install Python dependencies using uv:
@@ -86,7 +85,7 @@ uv run python subtitle_search_tool.py
 
 - **Smart filename display**: Extracted MKV subtitles show as "video.mkv [Track 0: en - English]"
 - **Precise seeking**: Jump directly to subtitle timing in video
-- **Multiple player support**: Tries VLC first (best), then mpv, then system default player
+- **Multiple player support**: Tries IINA (macOS), VLC, mpv, then system default player
 - **Cross-platform**: Works on macOS, Windows, and Linux
 
 ### Test Data
@@ -104,9 +103,13 @@ A sample subtitle file is included in `test_data/sample.srt` for testing the sea
 
 The tool supports multiple video players with automatic detection:
 
-1. **VLC Media Player** (recommended): Best seeking accuracy and format support
-2. **mpv**: Lightweight player with good seeking support
-3. **System default player**: Fallback option (may not support precise seeking)
+1. **IINA** (macOS only, recommended): Modern player with mpv backend, excellent seeking accuracy
+2. **VLC Media Player** (cross-platform): Best seeking accuracy and format support across all platforms
+3. **mpv**: Lightweight player with good seeking support
+4. **System default player**: Fallback option (may not support precise seeking)
+
+**Player Priority on macOS**: IINA → VLC → mpv → System default  
+**Player Priority on other platforms**: VLC → mpv → System default
 
 ## Troubleshooting
 
@@ -121,7 +124,7 @@ This error has been fixed in the latest version. If you encounter it:
 
 #### Video jump not working
 
-- Install VLC Media Player for best results
+- Install IINA (macOS) or VLC Media Player for best results
 - Check that the video file exists in the same location
 - Ensure FFmpeg is installed for MKV subtitle extraction
 
@@ -136,6 +139,19 @@ This error has been fixed in the latest version. If you encounter it:
 - The tool uses automatic encoding detection
 - If characters appear garbled, the file might use an unsupported encoding
 - Try converting the subtitle file to UTF-8
+
+### No video player found
+
+Install a compatible video player:
+
+```bash
+# macOS - IINA (recommended)
+brew install --cask iina
+
+# Cross-platform - VLC Media Player
+brew install --cask vlc      # macOS
+sudo apt install vlc         # Ubuntu/Debian
+```
 
 ## License
 
