@@ -10,12 +10,13 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import threading
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
 import subprocess
 import json
 import tempfile
 import chardet
 import pysubs2
+import platform
 
 
 class SubtitleSearchTool:
@@ -27,6 +28,10 @@ class SubtitleSearchTool:
         self.folder_path = ""
         self.subtitle_files = []
         self.search_results = []
+        # Map subtitle file to original video file and track info
+        self.subtitle_to_video_map: Dict[str, Dict] = {}
+        # Map tree item IDs to start times in milliseconds
+        self.item_start_times: Dict[str, int] = {}
         
         self.setup_ui()
         
@@ -92,6 +97,15 @@ class SubtitleSearchTool:
         self.tree.column("time", width=100)
         self.tree.column("text", width=500)
         
+        # Bind double-click event for jumping to video
+        self.tree.bind("<Double-1>", self.on_result_double_click)
+        
+        # Right-click context menu
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Jump to Video", command=self.jump_to_video)
+        self.tree.bind("<Button-2>", self.show_context_menu)  # macOS right-click
+        self.tree.bind("<Button-3>", self.show_context_menu)  # Windows/Linux right-click
+        
         # Scrollbars
         v_scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self.tree.yview)
         h_scrollbar = ttk.Scrollbar(results_frame, orient="horizontal", command=self.tree.xview)
@@ -105,6 +119,12 @@ class SubtitleSearchTool:
         self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
+        
+        # Instructions
+        instructions = ttk.Label(main_frame, 
+                               text="Double-click or right-click search results to jump to video position",
+                               font=("TkDefaultFont", 9))
+        instructions.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
         
     def browse_folder(self):
         """Browse and select a folder"""
@@ -131,6 +151,7 @@ class SubtitleSearchTool:
         """Worker thread for scanning subtitles"""
         try:
             self.subtitle_files = []
+            self.subtitle_to_video_map = {}
             subtitle_extensions = {'.srt', '.vtt', '.ass', '.ssa', '.sub', '.sbv', '.ttml'}
             
             # Scan for subtitle files
@@ -140,7 +161,14 @@ class SubtitleSearchTool:
                     
                     # Check for subtitle files
                     if file_path.suffix.lower() in subtitle_extensions:
-                        self.subtitle_files.append(str(file_path))
+                        subtitle_file = str(file_path)
+                        self.subtitle_files.append(subtitle_file)
+                        # Map standalone subtitle to itself
+                        self.subtitle_to_video_map[subtitle_file] = {
+                            'original_file': subtitle_file,
+                            'is_extracted': False,
+                            'track_index': -1
+                        }
                     
                     # Check for MKV files with embedded subtitles
                     elif file_path.suffix.lower() == '.mkv':
@@ -186,7 +214,17 @@ class SubtitleSearchTool:
                 else:
                     ext = '.srt'  # Default
                 
-                output_path = os.path.join(temp_dir, f"{base_name}_track{i}{ext}")
+                # Get language info if available
+                tags = stream.get('tags', {})
+                language = tags.get('language', f'track{i}')
+                title = tags.get('title', '')
+                
+                # Create descriptive filename
+                track_info = f"_{language}"
+                if title:
+                    track_info += f"_{title}"
+                
+                output_path = os.path.join(temp_dir, f"{base_name}{track_info}{ext}")
                 
                 # Extract subtitle
                 extract_cmd = [
@@ -197,6 +235,15 @@ class SubtitleSearchTool:
                 extract_result = subprocess.run(extract_cmd, capture_output=True)
                 if extract_result.returncode == 0 and os.path.exists(output_path):
                     extracted_files.append(output_path)
+                    
+                    # Map extracted subtitle to original video
+                    self.subtitle_to_video_map[output_path] = {
+                        'original_file': mkv_path,
+                        'is_extracted': True,
+                        'track_index': i,
+                        'language': language,
+                        'title': title
+                    }
                     
             return extracted_files
             
@@ -230,6 +277,9 @@ class SubtitleSearchTool:
         # Clear previous results
         for item in self.tree.get_children():
             self.tree.delete(item)
+        
+        # Clear previous timing data
+        self.item_start_times.clear()
             
         # Run search in a separate thread
         thread = threading.Thread(target=self._search_worker, args=(search_term,))
@@ -253,7 +303,7 @@ class SubtitleSearchTool:
         except Exception as e:
             self.root.after(0, lambda: self._search_error(str(e)))
             
-    def _search_in_file(self, file_path: str, pattern) -> List[Tuple[str, str, str]]:
+    def _search_in_file(self, file_path: str, pattern) -> List[Tuple[str, str, str, int]]:
         """Search for pattern in a subtitle file"""
         results = []
         
@@ -272,10 +322,11 @@ class SubtitleSearchTool:
                     # Format time
                     start_time = self._format_time(line.start)
                     
-                    # Get relative file path
-                    rel_path = os.path.relpath(file_path, self.folder_path)
+                    # Get display file name
+                    display_name = self._get_display_filename(file_path)
                     
-                    results.append((rel_path, start_time, line.text.strip()))
+                    # Store start time in milliseconds for jumping
+                    results.append((display_name, start_time, line.text.strip(), line.start))
                     
         except Exception:
             # If pysubs2 fails, try simple text search
@@ -284,13 +335,37 @@ class SubtitleSearchTool:
                     content = f.read()
                     
                 if pattern.search(content):
-                    rel_path = os.path.relpath(file_path, self.folder_path)
-                    results.append((rel_path, "--:--:--", "Text found (format not parsed)"))
+                    display_name = self._get_display_filename(file_path)
+                    results.append((display_name, "--:--:--", "Text found (format not parsed)", 0))
                     
             except Exception:
                 pass
                 
         return results
+    
+    def _get_display_filename(self, file_path: str) -> str:
+        """Get the display filename for search results"""
+        video_info = self.subtitle_to_video_map.get(file_path, {})
+        
+        if video_info.get('is_extracted', False):
+            # For extracted subtitles, show original video filename with track info
+            original_file = video_info['original_file']
+            rel_path = os.path.relpath(original_file, self.folder_path)
+            
+            # Add track information
+            language = video_info.get('language', 'unknown')
+            title = video_info.get('title', '')
+            track_index = video_info.get('track_index', 0)
+            
+            track_info = f" [Track {track_index}: {language}"
+            if title:
+                track_info += f" - {title}"
+            track_info += "]"
+            
+            return rel_path + track_info
+        else:
+            # For standalone subtitle files, show relative path
+            return os.path.relpath(file_path, self.folder_path)
     
     def _format_time(self, milliseconds: int) -> str:
         """Format time in milliseconds to HH:MM:SS"""
@@ -301,11 +376,13 @@ class SubtitleSearchTool:
         
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     
-    def _search_complete(self, results: List[Tuple[str, str, str]]):
+    def _search_complete(self, results: List[Tuple[str, str, str, int]]):
         """Called when search is complete"""
         # Add results to tree
-        for file_path, time, text in results:
-            self.tree.insert("", "end", values=(file_path, time, text))
+        for file_path, time, text, start_ms in results:
+            # Store the start time in milliseconds as hidden data
+            item = self.tree.insert("", "end", values=(file_path, time, text))
+            self.item_start_times[item] = start_ms
             
         count = len(results)
         self.status_var.set(f"Found {count} matches")
@@ -314,6 +391,123 @@ class SubtitleSearchTool:
         """Called when search encounters an error"""
         self.status_var.set("Search failed")
         messagebox.showerror("Error", f"Search failed: {error_msg}")
+    
+    def show_context_menu(self, event):
+        """Show context menu on right-click"""
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            self.context_menu.post(event.x_root, event.y_root)
+    
+    def on_result_double_click(self, event):
+        """Handle double-click on search result"""
+        self.jump_to_video()
+    
+    def jump_to_video(self):
+        """Jump to video at the selected time"""
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a search result first")
+            return
+            
+        item = selection[0]
+        file_display_name = self.tree.item(item, "values")[0]
+        start_time_ms = self.item_start_times.get(item, 0)
+        
+        # Find the original video file
+        video_file = self._find_video_file_from_display_name(file_display_name)
+        
+        if not video_file:
+            messagebox.showerror("Error", "Could not find video file")
+            return
+            
+        if not os.path.exists(video_file):
+            messagebox.showerror("Error", f"Video file not found: {video_file}")
+            return
+            
+        # Try to open with video player
+        success = self._open_video_at_time(video_file, start_time_ms)
+        
+        if not success:
+            messagebox.showerror("Error", "Could not open video file. Please install VLC or another compatible video player.")
+    
+    def _find_video_file_from_display_name(self, display_name: str) -> Optional[str]:
+        """Find the original video file from display name"""
+        # Remove track information if present
+        if " [Track " in display_name:
+            display_name = display_name.split(" [Track ")[0]
+        
+        # Search in subtitle_to_video_map
+        for subtitle_file, video_info in self.subtitle_to_video_map.items():
+            original_file = video_info['original_file']
+            rel_path = os.path.relpath(original_file, self.folder_path)
+            
+            if rel_path == display_name:
+                return original_file
+                
+        return None
+    
+    def _open_video_at_time(self, video_file: str, start_time_ms: int) -> bool:
+        """Open video file at specified time"""
+        try:
+            start_seconds = start_time_ms // 1000
+            
+            # Try VLC first (best support for seeking)
+            if self._try_vlc(video_file, start_seconds):
+                return True
+                
+            # Try mpv
+            if self._try_mpv(video_file, start_seconds):
+                return True
+                
+            # Try system default player (without seeking)
+            if self._try_system_default(video_file):
+                messagebox.showinfo("Info", f"Video opened with default player. Please seek to {self._format_time(start_time_ms)}")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            print(f"Error opening video: {e}")
+            return False
+    
+    def _try_vlc(self, video_file: str, start_seconds: int) -> bool:
+        """Try to open with VLC"""
+        vlc_commands = ['vlc', '/Applications/VLC.app/Contents/MacOS/VLC']
+        
+        for vlc_cmd in vlc_commands:
+            try:
+                cmd = [vlc_cmd, '--start-time', str(start_seconds), video_file]
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except (FileNotFoundError, OSError):
+                continue
+        return False
+    
+    def _try_mpv(self, video_file: str, start_seconds: int) -> bool:
+        """Try to open with mpv"""
+        try:
+            cmd = ['mpv', f'--start={start_seconds}', video_file]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except (FileNotFoundError, OSError):
+            return False
+    
+    def _try_system_default(self, video_file: str) -> bool:
+        """Try to open with system default player"""
+        try:
+            system = platform.system().lower()
+            
+            if system == 'darwin':  # macOS
+                subprocess.Popen(['open', video_file])
+            elif system == 'windows':
+                subprocess.Popen(['start', video_file], shell=True)
+            else:  # Linux
+                subprocess.Popen(['xdg-open', video_file])
+            
+            return True
+        except Exception:
+            return False
 
 
 def main():
