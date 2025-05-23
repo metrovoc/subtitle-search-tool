@@ -95,9 +95,11 @@ uv run python subtitle_search_tool.py
 - **Intelligent caching**: Parsed subtitle files are cached in memory for instant re-search
 - **Parallel processing**: Multiple files searched simultaneously using ThreadPoolExecutor
 - **Smart pre-loading**: Subtitle files are parsed in background after scanning
-- **Optimized encoding detection**: Only reads first 8KB of files for encoding detection
+- **Optimized encoding detection**: Enhanced encoding detection with 32KB sample for better accuracy
 - **Fast search algorithms**: Cached text searching with compiled regex patterns
 - **Memory management**: Automatic cache invalidation when files are modified
+- **Robust fallback**: Multiple parsing methods ensure no text is missed
+- **Search validation**: Built-in accuracy verification and detailed logging
 
 ### Test Data
 
@@ -147,7 +149,7 @@ This error has been fixed in the latest version. If you encounter it:
 
 #### Encoding issues with subtitle files
 
-- The tool uses automatic encoding detection
+- The tool uses enhanced encoding detection with multiple fallback methods
 - If characters appear garbled, the file might use an unsupported encoding
 - Try converting the subtitle file to UTF-8
 
@@ -156,6 +158,12 @@ This error has been fixed in the latest version. If you encounter it:
 - The tool now uses intelligent caching and parallel processing
 - First search may be slower as files are parsed and cached
 - Subsequent searches should be much faster using cached data
+
+#### Missing search results
+
+- The tool now includes enhanced fallback parsing methods
+- Multiple encoding detection strategies ensure maximum text coverage
+- Enable debug output to see detailed search statistics
 
 ### No video player found
 

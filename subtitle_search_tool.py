@@ -324,34 +324,78 @@ class SubtitleSearchTool:
             # Parse and cache the file
             lines = []
             
-            # Detect encoding once
+            # Improved encoding detection - read more data for better accuracy
             with open(file_path, 'rb') as f:
-                raw_data = f.read(8192)  # Read first 8KB for encoding detection
+                raw_data = f.read(32768)  # Read first 32KB for better encoding detection
                 encoding_result = chardet.detect(raw_data)
                 encoding = encoding_result.get('encoding', 'utf-8')
+                
+                # Handle common encoding issues
+                if encoding and encoding.lower() in ['ascii', 'windows-1252']:
+                    encoding = 'utf-8'
             
-            # Parse subtitle file
-            subs = pysubs2.load(file_path, encoding=encoding)
-            
-            for line in subs:
-                lines.append(SubtitleLine(
-                    start_ms=line.start,
-                    text=line.text.strip()
-                ))
-            
-            # Cache the result
-            cached_subtitle = CachedSubtitle(
-                file_path=file_path,
-                lines=lines,
-                last_modified=file_mtime
-            )
-            self.subtitle_cache[file_path] = cached_subtitle
-            
-            return cached_subtitle
+            try:
+                # Parse subtitle file
+                subs = pysubs2.load(file_path, encoding=encoding)
+                
+                for line in subs:
+                    # Preserve original text without stripping (important for search accuracy)
+                    lines.append(SubtitleLine(
+                        start_ms=line.start,
+                        text=line.text
+                    ))
+                
+                # Cache the result
+                cached_subtitle = CachedSubtitle(
+                    file_path=file_path,
+                    lines=lines,
+                    last_modified=file_mtime
+                )
+                self.subtitle_cache[file_path] = cached_subtitle
+                
+                return cached_subtitle
+                
+            except Exception as parse_error:
+                print(f"Warning: Could not parse {file_path} with pysubs2: {parse_error}")
+                # Try fallback text parsing for better coverage
+                return self._parse_subtitle_fallback(file_path, encoding, file_mtime)
             
         except Exception as e:
-            print(f"Error parsing subtitle file {file_path}: {e}")
+            print(f"Error accessing subtitle file {file_path}: {e}")
             return None
+    
+    def _parse_subtitle_fallback(self, file_path: str, encoding: str, file_mtime: float) -> Optional[CachedSubtitle]:
+        """Fallback parsing method for files that pysubs2 can't handle"""
+        try:
+            lines = []
+            
+            # Try to parse as simple text with line numbers as timestamps
+            with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
+                content = f.read()
+                
+            # Split into lines and create fake subtitle entries
+            text_lines = content.split('\n')
+            for i, text_line in enumerate(text_lines):
+                text_line = text_line.strip()
+                if text_line:  # Skip empty lines
+                    lines.append(SubtitleLine(
+                        start_ms=i * 1000,  # Fake timestamp
+                        text=text_line
+                    ))
+            
+            if lines:
+                cached_subtitle = CachedSubtitle(
+                    file_path=file_path,
+                    lines=lines,
+                    last_modified=file_mtime
+                )
+                self.subtitle_cache[file_path] = cached_subtitle
+                return cached_subtitle
+                
+        except Exception as e:
+            print(f"Fallback parsing also failed for {file_path}: {e}")
+            
+        return None
     
     def _clear_cache(self):
         """Clear subtitle cache"""
@@ -396,6 +440,14 @@ class SubtitleSearchTool:
             flags = 0 if self.case_sensitive.get() else re.IGNORECASE
             pattern = re.compile(re.escape(search_term), flags)
             
+            print(f"🔍 Starting search for '{search_term}' in {len(self.subtitle_files)} files")
+            print(f"🏷️  Case sensitive: {self.case_sensitive.get()}")
+            
+            # Track search statistics
+            files_processed = 0
+            files_with_results = 0
+            total_cache_hits = 0
+            
             # Use parallel processing for faster search
             search_tasks = []
             
@@ -403,23 +455,41 @@ class SubtitleSearchTool:
             with ThreadPoolExecutor(max_workers=4) as executor:
                 for subtitle_file in self.subtitle_files:
                     future = executor.submit(self._search_in_file_cached, subtitle_file, pattern)
-                    search_tasks.append(future)
+                    search_tasks.append((future, subtitle_file))
                 
                 # Collect results as they complete
-                for future in as_completed(search_tasks):
+                for future, subtitle_file in search_tasks:
                     try:
                         file_results = future.result()
+                        files_processed += 1
+                        
+                        if file_results:
+                            files_with_results += 1
+                            print(f"✅ Found {len(file_results)} matches in {os.path.basename(subtitle_file)}")
+                        
+                        # Check if this was a cache hit
+                        if subtitle_file in self.subtitle_cache:
+                            total_cache_hits += 1
+                            
                         results.extend(file_results)
                     except Exception as e:
-                        print(f"Error searching file: {e}")
+                        print(f"❌ Error searching file {subtitle_file}: {e}")
             
             search_time = time.time() - start_time
-            print(f"Search completed in {search_time:.2f} seconds")
+            
+            # Log search statistics
+            print(f"📊 Search Statistics:")
+            print(f"   • Files processed: {files_processed}/{len(self.subtitle_files)}")
+            print(f"   • Files with matches: {files_with_results}")
+            print(f"   • Total matches found: {len(results)}")
+            print(f"   • Cache hits: {total_cache_hits}/{len(self.subtitle_files)}")
+            print(f"   • Search time: {search_time:.3f} seconds")
             
             # Update UI in main thread
             self.root.after(0, lambda: self._search_complete(results))
             
         except Exception as e:
+            print(f"❌ Search worker error: {e}")
             self.root.after(0, lambda: self._search_error(str(e)))
     
     def _search_in_file_cached(self, file_path: str, pattern) -> List[Tuple[str, str, str, int]]:
@@ -439,17 +509,33 @@ class SubtitleSearchTool:
                     # Get display file name
                     display_name = self._get_display_filename(file_path)
                     
-                    results.append((display_name, start_time, line.text, line.start_ms))
+                    # Use consistent text stripping for display
+                    display_text = line.text.strip()
+                    results.append((display_name, start_time, display_text, line.start_ms))
         else:
-            # Fallback to original method if caching failed
-            try:
-                # Detect encoding
-                with open(file_path, 'rb') as f:
-                    raw_data = f.read(8192)
-                    encoding_result = chardet.detect(raw_data)
-                    encoding = encoding_result.get('encoding', 'utf-8')
+            # Enhanced fallback method if caching failed
+            print(f"Cache miss for {file_path}, using direct parsing")
+            results = self._search_in_file_direct(file_path, pattern)
                 
-                # Parse subtitle file
+        return results
+    
+    def _search_in_file_direct(self, file_path: str, pattern) -> List[Tuple[str, str, str, int]]:
+        """Direct search in subtitle file without caching"""
+        results = []
+        
+        try:
+            # Better encoding detection for direct parsing
+            with open(file_path, 'rb') as f:
+                raw_data = f.read(32768)
+                encoding_result = chardet.detect(raw_data)
+                encoding = encoding_result.get('encoding', 'utf-8')
+                
+                # Handle common encoding issues
+                if encoding and encoding.lower() in ['ascii', 'windows-1252']:
+                    encoding = 'utf-8'
+            
+            try:
+                # Parse subtitle file with pysubs2
                 subs = pysubs2.load(file_path, encoding=encoding)
                 
                 for line in subs:
@@ -460,20 +546,39 @@ class SubtitleSearchTool:
                         # Get display file name
                         display_name = self._get_display_filename(file_path)
                         
-                        results.append((display_name, start_time, line.text.strip(), line.start))
+                        # Consistent text handling
+                        display_text = line.text.strip()
+                        results.append((display_name, start_time, display_text, line.start))
                         
-            except Exception:
-                # If pysubs2 fails, try simple text search
+            except Exception as pysubs_error:
+                print(f"pysubs2 failed for {file_path}: {pysubs_error}")
+                # Enhanced fallback: try simple text search
                 try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
                         content = f.read()
-                        
+                    
+                    # Search in raw content
                     if pattern.search(content):
                         display_name = self._get_display_filename(file_path)
-                        results.append((display_name, "--:--:--", "Text found (format not parsed)", 0))
                         
-                except Exception:
-                    pass
+                        # Try to find specific matching lines
+                        lines = content.split('\n')
+                        for i, line in enumerate(lines):
+                            line = line.strip()
+                            if line and pattern.search(line):
+                                # Create fake timestamp based on line number
+                                fake_time = self._format_time(i * 1000)
+                                results.append((display_name, fake_time, line, i * 1000))
+                        
+                        # If no specific lines found but pattern matches, add general match
+                        if not results:
+                            results.append((display_name, "--:--:--", "Text found (format not parsed)", 0))
+                            
+                except Exception as text_error:
+                    print(f"Text search also failed for {file_path}: {text_error}")
+                    
+        except Exception as file_error:
+            print(f"Could not access file {file_path}: {file_error}")
                 
         return results
     
