@@ -17,6 +17,23 @@ import tempfile
 import chardet
 import pysubs2
 import platform
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from dataclasses import dataclass
+
+
+@dataclass
+class SubtitleLine:
+    """Cached subtitle line data"""
+    start_ms: int
+    text: str
+    
+@dataclass
+class CachedSubtitle:
+    """Cached subtitle file data"""
+    file_path: str
+    lines: List[SubtitleLine]
+    last_modified: float
 
 
 class SubtitleSearchTool:
@@ -32,8 +49,15 @@ class SubtitleSearchTool:
         self.subtitle_to_video_map: Dict[str, Dict] = {}
         # Map tree item IDs to start times in milliseconds
         self.item_start_times: Dict[str, int] = {}
+        # Cache for parsed subtitle files
+        self.subtitle_cache: Dict[str, CachedSubtitle] = {}
+        # Thread pool for parallel processing
+        self.executor = ThreadPoolExecutor(max_workers=4)
         
         self.setup_ui()
+        
+        # Bind cleanup to window close event
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         
     def setup_ui(self):
         """Setup the user interface"""
@@ -139,6 +163,9 @@ class SubtitleSearchTool:
             messagebox.showwarning("Warning", "Please select a folder first")
             return
             
+        # Clear cache when scanning new folder
+        self._clear_cache()
+        
         self.status_var.set("Scanning subtitles...")
         self.root.update()
         
@@ -255,6 +282,81 @@ class SubtitleSearchTool:
         count = len(self.subtitle_files)
         self.status_var.set(f"Found {count} subtitle files")
         
+        # Pre-load subtitle files in background for faster searching
+        if count > 0:
+            self.status_var.set(f"Found {count} subtitle files - Pre-loading...")
+            threading.Thread(target=self._preload_subtitles, daemon=True).start()
+        
+    def _preload_subtitles(self):
+        """Pre-load subtitle files for faster searching"""
+        try:
+            loaded = 0
+            for subtitle_file in self.subtitle_files:
+                self._get_cached_subtitle(subtitle_file)
+                loaded += 1
+                # Update status periodically
+                if loaded % 5 == 0:
+                    self.root.after(0, lambda: self.status_var.set(
+                        f"Pre-loaded {loaded}/{len(self.subtitle_files)} files"))
+            
+            self.root.after(0, lambda: self.status_var.set(
+                f"Found {len(self.subtitle_files)} subtitle files - Ready for fast search"))
+        except Exception as e:
+            print(f"Error pre-loading subtitles: {e}")
+            self.root.after(0, lambda: self.status_var.set(
+                f"Found {len(self.subtitle_files)} subtitle files"))
+    
+    def _get_cached_subtitle(self, file_path: str) -> Optional[CachedSubtitle]:
+        """Get cached subtitle or parse and cache it"""
+        try:
+            # Check if file exists
+            if not os.path.exists(file_path):
+                return None
+                
+            file_mtime = os.path.getmtime(file_path)
+            
+            # Check cache
+            if file_path in self.subtitle_cache:
+                cached = self.subtitle_cache[file_path]
+                if cached.last_modified >= file_mtime:
+                    return cached
+            
+            # Parse and cache the file
+            lines = []
+            
+            # Detect encoding once
+            with open(file_path, 'rb') as f:
+                raw_data = f.read(8192)  # Read first 8KB for encoding detection
+                encoding_result = chardet.detect(raw_data)
+                encoding = encoding_result.get('encoding', 'utf-8')
+            
+            # Parse subtitle file
+            subs = pysubs2.load(file_path, encoding=encoding)
+            
+            for line in subs:
+                lines.append(SubtitleLine(
+                    start_ms=line.start,
+                    text=line.text.strip()
+                ))
+            
+            # Cache the result
+            cached_subtitle = CachedSubtitle(
+                file_path=file_path,
+                lines=lines,
+                last_modified=file_mtime
+            )
+            self.subtitle_cache[file_path] = cached_subtitle
+            
+            return cached_subtitle
+            
+        except Exception as e:
+            print(f"Error parsing subtitle file {file_path}: {e}")
+            return None
+    
+    def _clear_cache(self):
+        """Clear subtitle cache"""
+        self.subtitle_cache.clear()
+    
     def _scan_error(self, error_msg):
         """Called when scan encounters an error"""
         self.status_var.set("Scan failed")
@@ -271,7 +373,7 @@ class SubtitleSearchTool:
             messagebox.showwarning("Warning", "Please scan for subtitles first")
             return
             
-        self.status_var.set("Searching...")
+        self.status_var.set(f"Searching '{search_term}' in {len(self.subtitle_files)} files...")
         self.root.update()
         
         # Clear previous results
@@ -287,59 +389,91 @@ class SubtitleSearchTool:
         thread.start()
         
     def _search_worker(self, search_term: str):
-        """Worker thread for searching"""
+        """Worker thread for searching with parallel processing"""
         try:
+            start_time = time.time()
             results = []
             flags = 0 if self.case_sensitive.get() else re.IGNORECASE
             pattern = re.compile(re.escape(search_term), flags)
             
-            for subtitle_file in self.subtitle_files:
-                file_results = self._search_in_file(subtitle_file, pattern)
-                results.extend(file_results)
+            # Use parallel processing for faster search
+            search_tasks = []
+            
+            # Submit search tasks to thread pool
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                for subtitle_file in self.subtitle_files:
+                    future = executor.submit(self._search_in_file_cached, subtitle_file, pattern)
+                    search_tasks.append(future)
                 
+                # Collect results as they complete
+                for future in as_completed(search_tasks):
+                    try:
+                        file_results = future.result()
+                        results.extend(file_results)
+                    except Exception as e:
+                        print(f"Error searching file: {e}")
+            
+            search_time = time.time() - start_time
+            print(f"Search completed in {search_time:.2f} seconds")
+            
             # Update UI in main thread
             self.root.after(0, lambda: self._search_complete(results))
             
         except Exception as e:
             self.root.after(0, lambda: self._search_error(str(e)))
-            
-    def _search_in_file(self, file_path: str, pattern) -> List[Tuple[str, str, str, int]]:
-        """Search for pattern in a subtitle file"""
+    
+    def _search_in_file_cached(self, file_path: str, pattern) -> List[Tuple[str, str, str, int]]:
+        """Search for pattern in a cached subtitle file"""
         results = []
         
-        try:
-            # Detect encoding
-            with open(file_path, 'rb') as f:
-                raw_data = f.read()
-                encoding_result = chardet.detect(raw_data)
-                encoding = encoding_result.get('encoding', 'utf-8')
-            
-            # Parse subtitle file
-            subs = pysubs2.load(file_path, encoding=encoding)
-            
-            for line in subs:
+        # Try to get cached subtitle first
+        cached_subtitle = self._get_cached_subtitle(file_path)
+        
+        if cached_subtitle:
+            # Search in cached data (much faster)
+            for line in cached_subtitle.lines:
                 if pattern.search(line.text):
                     # Format time
-                    start_time = self._format_time(line.start)
+                    start_time = self._format_time(line.start_ms)
                     
                     # Get display file name
                     display_name = self._get_display_filename(file_path)
                     
-                    # Store start time in milliseconds for jumping
-                    results.append((display_name, start_time, line.text.strip(), line.start))
-                    
-        except Exception:
-            # If pysubs2 fails, try simple text search
+                    results.append((display_name, start_time, line.text, line.start_ms))
+        else:
+            # Fallback to original method if caching failed
             try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                    
-                if pattern.search(content):
-                    display_name = self._get_display_filename(file_path)
-                    results.append((display_name, "--:--:--", "Text found (format not parsed)", 0))
-                    
+                # Detect encoding
+                with open(file_path, 'rb') as f:
+                    raw_data = f.read(8192)
+                    encoding_result = chardet.detect(raw_data)
+                    encoding = encoding_result.get('encoding', 'utf-8')
+                
+                # Parse subtitle file
+                subs = pysubs2.load(file_path, encoding=encoding)
+                
+                for line in subs:
+                    if pattern.search(line.text):
+                        # Format time
+                        start_time = self._format_time(line.start)
+                        
+                        # Get display file name
+                        display_name = self._get_display_filename(file_path)
+                        
+                        results.append((display_name, start_time, line.text.strip(), line.start))
+                        
             except Exception:
-                pass
+                # If pysubs2 fails, try simple text search
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        
+                    if pattern.search(content):
+                        display_name = self._get_display_filename(file_path)
+                        results.append((display_name, "--:--:--", "Text found (format not parsed)", 0))
+                        
+                except Exception:
+                    pass
                 
         return results
     
@@ -385,7 +519,8 @@ class SubtitleSearchTool:
             self.item_start_times[item] = start_ms
             
         count = len(results)
-        self.status_var.set(f"Found {count} matches")
+        files_count = len(self.subtitle_files)
+        self.status_var.set(f"Found {count} matches in {files_count} files")
         
     def _search_error(self, error_msg):
         """Called when search encounters an error"""
@@ -540,6 +675,18 @@ class SubtitleSearchTool:
             return True
         except Exception:
             return False
+    
+    def _on_closing(self):
+        """Clean up resources when closing the application"""
+        try:
+            # Shutdown thread pool
+            self.executor.shutdown(wait=False)
+            # Clear cache
+            self._clear_cache()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        finally:
+            self.root.destroy()
 
 
 def main():

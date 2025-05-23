@@ -14,6 +14,8 @@ A GUI application to search text in subtitle files including embedded MKV subtit
 - Multi-threaded processing for responsive UI
 - Support for multiple text encodings with automatic detection
 - Cross-platform video player integration (VLC, mpv, system default)
+- **High-performance search**: Intelligent caching and parallel processing for fast searches
+- **Smart pre-loading**: Background subtitle parsing for instant search results
 
 ## Requirements
 
@@ -88,6 +90,15 @@ uv run python subtitle_search_tool.py
 - **Multiple player support**: Tries IINA (macOS), VLC, mpv, then system default player
 - **Cross-platform**: Works on macOS, Windows, and Linux
 
+### Performance Features
+
+- **Intelligent caching**: Parsed subtitle files are cached in memory for instant re-search
+- **Parallel processing**: Multiple files searched simultaneously using ThreadPoolExecutor
+- **Smart pre-loading**: Subtitle files are parsed in background after scanning
+- **Optimized encoding detection**: Only reads first 8KB of files for encoding detection
+- **Fast search algorithms**: Cached text searching with compiled regex patterns
+- **Memory management**: Automatic cache invalidation when files are modified
+
 ### Test Data
 
 A sample subtitle file is included in `test_data/sample.srt` for testing the search functionality.
@@ -139,6 +150,12 @@ This error has been fixed in the latest version. If you encounter it:
 - The tool uses automatic encoding detection
 - If characters appear garbled, the file might use an unsupported encoding
 - Try converting the subtitle file to UTF-8
+
+#### Slow search performance
+
+- The tool now uses intelligent caching and parallel processing
+- First search may be slower as files are parsed and cached
+- Subsequent searches should be much faster using cached data
 
 ### No video player found
 
